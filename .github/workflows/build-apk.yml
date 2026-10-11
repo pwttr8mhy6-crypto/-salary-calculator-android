@@ -1,0 +1,235 @@
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find calculator HTML
+        run: |
+          test -f salary_calculator_design_v3.html
+          mkdir -p app/src/main/assets
+          cp salary_calculator_design_v3.html app/src/main/assets/index.html
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project
+        run: |
+          mkdir -p app/src/main/java/ru/salary/calculator
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SalaryCalculator"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'ru.salary.calculator'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'ru.salary.calculator'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="Расчёт зарплаты"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <receiver
+                      android:name=".ShiftWidgetProvider"
+                      android:label="Календарь смен"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.appwidget.provider"
+                          android:resource="@xml/shift_widget_info"/>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#315DA8</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/ru/salary/calculator/MainActivity.java <<'EOF'
+          package ru.salary.calculator;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  WebView web = new WebView(this);
+                  web.getSettings().setJavaScriptEnabled(true);
+                  web.getSettings().setDomStorageEnabled(true);
+                  web.setWebViewClient(new WebViewClient());
+                  setContentView(web);
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/layout/shift_widget.xml <<'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="12dp"
+              android:background="#FFF3F5F9">
+              <TextView
+                  android:id="@+id/widget_title"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Календарь смен"
+                  android:textStyle="bold"
+                  android:textSize="18sp"
+                  android:textColor="#17365D"/>
+              <TextView
+                  android:id="@+id/widget_date"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:paddingTop="8dp"
+                  android:textSize="15sp"
+                  android:textColor="#202020"/>
+              <TextView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:paddingTop="6dp"
+                  android:text="Нажмите, чтобы открыть калькулятор"
+                  android:textSize="12sp"
+                  android:textColor="#555555"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/xml/shift_widget_info.xml <<'EOF'
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp"
+              android:minHeight="90dp"
+              android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/shift_widget"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"/>
+          EOF
+
+          cat > app/src/main/java/ru/salary/calculator/ShiftWidgetProvider.java <<'EOF'
+          package ru.salary.calculator;
+
+          import android.app.PendingIntent;
+          import android.appwidget.AppWidgetManager;
+          import android.appwidget.AppWidgetProvider;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.widget.RemoteViews;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class ShiftWidgetProvider extends AppWidgetProvider {
+              @Override
+              public void onUpdate(Context context, AppWidgetManager manager,
+                                   int[] ids) {
+                  for (int id : ids) {
+                      RemoteViews views = new RemoteViews(
+                          context.getPackageName(), R.layout.shift_widget);
+                      String date = new SimpleDateFormat(
+                          "EEEE, d MMMM", new Locale("ru"))
+                          .format(new Date());
+                      views.setTextViewText(R.id.widget_date, date);
+
+                      Intent intent = new Intent(context, MainActivity.class);
+                      PendingIntent pending = PendingIntent.getActivity(
+                          context, 0, intent,
+                          PendingIntent.FLAG_UPDATE_CURRENT |
+                          PendingIntent.FLAG_IMMUTABLE);
+                      views.setOnClickPendingIntent(R.id.widget_title, pending);
+                      views.setOnClickPendingIntent(R.id.widget_date, pending);
+                      manager.updateAppWidget(id, views);
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: salary-calculator-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
