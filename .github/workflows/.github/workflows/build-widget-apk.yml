@@ -1,0 +1,314 @@
+
+name: Build Widget APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/java/com/salary/widget
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/xml
+
+          cp salary_calculator_design_v3.html app/src/main/assets/index.html
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SalaryWidget"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.salary.widget'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.salary.widget'
+                  minSdk 23
+                  targetSdk 28
+                  versionCode 2
+                  versionName '2.0'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application
+                android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                android:label="Калькулятор зарплаты"
+                android:usesCleartextTraffic="true">
+              <activity
+                  android:name=".MainActivity"
+                  android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <receiver
+                  android:name=".ShiftWidgetProvider"
+                  android:exported="true">
+                <intent-filter>
+                  <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+                </intent-filter>
+                <meta-data
+                    android:name="android.appwidget.provider"
+                    android:resource="@xml/widget_info"/>
+              </receiver>
+            </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/layout/widget.xml <<'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:orientation="vertical"
+              android:padding="14dp"
+              android:gravity="center_vertical"
+              android:background="#202733"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+            <TextView
+                android:id="@+id/widget_text"
+                android:text="Откройте калькулятор"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:lineSpacingExtra="4dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/xml/widget_info.xml <<'EOF'
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp"
+              android:minHeight="90dp"
+              android:initialLayout="@layout/widget"
+              android:updatePeriodMillis="1800000"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"/>
+          EOF
+
+          cat > app/src/main/java/com/salary/widget/MainActivity.java <<'EOF'
+          package com.salary.widget;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebSettings;
+          import android.webkit.JavascriptInterface;
+          import android.appwidget.AppWidgetManager;
+          import android.content.ComponentName;
+          import android.content.Context;
+          import org.json.JSONObject;
+
+          public class MainActivity extends Activity {
+              WebView web;
+
+              @Override
+              public void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  web.addJavascriptInterface(new Bridge(this), "AndroidWidget");
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+
+              public static class Bridge {
+                  Context c;
+                  Bridge(Context context) { c = context.getApplicationContext(); }
+
+                  @JavascriptInterface
+                  public void updateSchedule(String json) {
+                      c.getSharedPreferences("widget_data", 0)
+                          .edit().putString("state", json).apply();
+                      AppWidgetManager manager = AppWidgetManager.getInstance(c);
+                      ComponentName name = new ComponentName(c, ShiftWidgetProvider.class);
+                      int[] ids = manager.getAppWidgetIds(name);
+                      new ShiftWidgetProvider().onUpdate(c, manager, ids);
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/salary/widget/ShiftWidgetProvider.java <<'EOF'
+          package com.salary.widget;
+
+          import android.appwidget.AppWidgetProvider;
+          import android.appwidget.AppWidgetManager;
+          import android.content.Context;
+          import android.widget.RemoteViews;
+          import android.content.Intent;
+          import android.app.PendingIntent;
+          import org.json.JSONObject;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          import java.util.Calendar;
+
+          public class ShiftWidgetProvider extends AppWidgetProvider {
+              @Override
+              public void onUpdate(Context c, AppWidgetManager manager, int[] ids) {
+                  String text = makeText(c);
+                  for (int id : ids) {
+                      RemoteViews v = new RemoteViews(c.getPackageName(), R.layout.widget);
+                      v.setTextViewText(R.id.widget_text, text);
+                      Intent intent = new Intent(c, MainActivity.class);
+                      PendingIntent pi = PendingIntent.getActivity(c, 0, intent,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                      v.setOnClickPendingIntent(R.id.widget_text, pi);
+                      manager.updateAppWidget(id, v);
+                  }
+              }
+
+              private String makeText(Context c) {
+                  String date = new SimpleDateFormat("EEE, d MMM", Locale.getDefault())
+                      .format(new Date());
+                  String raw = c.getSharedPreferences("widget_data", 0)
+                      .getString("state", "");
+                  if (raw.isEmpty()) {
+                      return "График смен\\n" + date + "\\nОткройте приложение";
+                  }
+                  try {
+                      JSONObject s = new JSONObject(raw);
+                      String start = s.optString("cycleStart", "");
+                      int work = s.optInt("workDays", 3);
+                      int off = s.optInt("offDays", 2);
+                      if (work < 1 || off < 1 || start.isEmpty()) {
+                          return "График смен\\n" + date + "\\nПроверьте настройки графика";
+                      }
+                      Calendar base = parseDate(start);
+                      if (base == null) {
+                          return "График смен\\n" + date + "\\nСохраните график в приложении";
+                      }
+                      Calendar today = Calendar.getInstance();
+                      clearTime(base);
+                      clearTime(today);
+                      long days = (today.getTimeInMillis() - base.getTimeInMillis())
+                          / 86400000L;
+                      int cycle = (int)(((days % (work + off)) + work + off) % (work + off));
+                      boolean working = cycle < work;
+                      String status = working ? "РАБОЧАЯ СМЕНА" : "ВЫХОДНОЙ";
+                      String hours = "";
+                      if (working) {
+                          String a = s.optString("shiftStart", "");
+                          String b = s.optString("shiftEnd", "");
+                          if (!a.isEmpty() && !b.isEmpty()) hours = "\\n" + a + " – " + b;
+                      }
+                      return "График смен\\n" + date + "\\n" + status + hours;
+                  } catch (Exception e) {
+                      return "График смен\\n" + date + "\\nОткройте калькулятор";
+                  }
+              }
+
+              private static void clearTime(Calendar c) {
+                  c.set(Calendar.HOUR_OF_DAY, 0);
+                  c.set(Calendar.MINUTE, 0);
+                  c.set(Calendar.SECOND, 0);
+                  c.set(Calendar.MILLISECOND, 0);
+              }
+
+              private static Calendar parseDate(String value) {
+                  String[] formats = {"yyyy-MM-dd", "dd.MM.yyyy", "yyyy-MM-dd'T'HH:mm:ss"};
+                  for (String f : formats) {
+                      try {
+                          SimpleDateFormat sdf = new SimpleDateFormat(f, Locale.US);
+                          sdf.setLenient(false);
+                          Date d = sdf.parse(value);
+                          if (d != null) {
+                              Calendar c = Calendar.getInstance();
+                              c.setTime(d);
+                              return c;
+                          }
+                      } catch (Exception ignored) {}
+                  }
+                  return null;
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/assets/index.html")
+          html = p.read_text(encoding="utf-8")
+          bridge = """
+          <script>
+          (function(){
+            function sendSchedule(){
+              try {
+                var data = localStorage.getItem('shiftCalendar3x2_v1');
+                if (data && window.AndroidWidget) {
+                  window.AndroidWidget.updateSchedule(data);
+                }
+              } catch(e) {}
+            }
+            setTimeout(sendSchedule, 1500);
+            setInterval(sendSchedule, 5000);
+            window.addEventListener('load', sendSchedule);
+          })();
+          </script>
+          """
+          pos = html.lower().rfind("</body>")
+          if pos >= 0:
+              html = html[:pos] + bridge + html[pos:]
+          else:
+              html += bridge
+          p.write_text(html, encoding="utf-8")
+          PY
+
+      - name: Build APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: salary-widget-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
